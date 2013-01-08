@@ -148,7 +148,7 @@ func init() {
 	case "-":
 		Default.Tracer = fdwriter(syscall.Stdout)
 	default:
-		mode := syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC
+		mode := syscall.O_WRONLY | syscall.O_CREAT | syscall.O_APPEND
 		fd, err := syscall.Open(path, mode, 0666)
 		if err != nil {
 			msg := "gocov: failed to create log file: "

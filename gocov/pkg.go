@@ -25,7 +25,6 @@ package main
 // package lookup helpers, based on cmd/go/main.go
 
 import (
-	"fmt"
 	"go/build"
 	"os"
 	"path"
@@ -36,8 +35,7 @@ import (
 )
 
 // importPaths returns the import paths to use for the given command line.
-func importPaths(args ...string) []string {
-	fmt.Println("importPaths", args)
+func importPaths(args []string) []string {
 	args = importPathsNoDotExpansion(args)
 	var out []string
 	for _, a := range args {
@@ -127,33 +125,6 @@ func matchPackages(pattern string) []string {
 	}
 	var pkgs []string
 
-	// Commands
-	cmd := filepath.Join(runtime.GOROOT(), "src/cmd") + string(filepath.Separator)
-	filepath.Walk(cmd, func(path string, fi os.FileInfo, err error) error {
-		if err != nil || !fi.IsDir() || path == cmd {
-			return nil
-		}
-		name := path[len(cmd):]
-		// Commands are all in cmd/, not in subdirectories.
-		if strings.Contains(name, string(filepath.Separator)) {
-			return filepath.SkipDir
-		}
-
-		_, err = build.ImportDir(path, 0)
-		if err != nil {
-			return nil
-		}
-
-		// We use, e.g., cmd/gofmt as the pseudo import path for gofmt.
-		name = "cmd/" + name
-		if !have[name] {
-			have[name] = true
-			if match(name) {
-				pkgs = append(pkgs, name)
-			}
-		}
-		return nil
-	})
 	gorootSrcPkg := filepath.Join(runtime.GOROOT(), "src/pkg")
 	for _, src := range build.Default.SrcDirs() {
 		if pattern == "std" && src != gorootSrcPkg {

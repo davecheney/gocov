@@ -323,10 +323,6 @@ func (in *instrumenter) instrumentPackage(pkgpath string, testPackage bool) erro
 	return nil
 }
 
-func marshalJson(packages []*gocov.Package) ([]byte, error) {
-	return json.Marshal(struct{ Packages []*gocov.Package }{packages})
-}
-
 func unmarshalJson(data []byte) (packages []*gocov.Package, err error) {
 	result := &struct{ Packages []*gocov.Package }{}
 	err = json.Unmarshal(data, result)
@@ -338,125 +334,124 @@ func unmarshalJson(data []byte) (packages []*gocov.Package, err error) {
 
 func instrumentAndTest() (rc int) {
 	testFlags.Parse(os.Args[2:])
-	for _, packageName := range importPaths(testFlags.Args()...) {
-		tempDir, err := ioutil.TempDir("", "gocov")
+	tempDir, err := ioutil.TempDir("", "gocov")
+	if err != nil {
+		errorf("failed to create temporary GOROOT: %s\n", err)
+		return 1
+	}
+	if *testWorkFlag {
+		fmt.Fprintf(os.Stderr, "WORK=%s\n", tempDir)
+	} else {
+		defer func() {
+			err := os.RemoveAll(tempDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr,
+					"warning: failed to delete temporary GOROOT (%s)\n", tempDir)
+			}
+		}()
+	}
+
+	for _, name := range [...]string{"src", "pkg", "bin", "lib", "include"} {
+		dir := filepath.Join(runtime.GOROOT(), name)
+		err = symlinkHierarchy(dir, filepath.Join(tempDir, name))
 		if err != nil {
-			errorf("failed to create temporary GOROOT: %s\n", err)
+			errorf("failed to create $GOROOT/%s: %s\n", name, err)
 			return 1
 		}
-		if *testWorkFlag {
-			fmt.Fprintf(os.Stderr, "WORK=%s\n", tempDir)
-		} else {
-			defer func() {
-				err := os.RemoveAll(tempDir)
-				if err != nil {
-					fmt.Fprintf(os.Stderr,
-						"warning: failed to delete temporary GOROOT (%s)\n", tempDir)
-				}
-			}()
-		}
+	}
 
-		for _, name := range [...]string{"src", "pkg", "bin", "lib", "include"} {
-			dir := filepath.Join(runtime.GOROOT(), name)
-			err = symlinkHierarchy(dir, filepath.Join(tempDir, name))
-			if err != nil {
-				errorf("failed to create $GOROOT/%s: %s\n", name, err)
-				return 1
-			}
-		}
-
-		// Copy gocov into the temporary GOROOT, since otherwise it'll
-		// be eclipsed by the instrumented packages root.
-		if p, err := build.Import(gocovPackagePath, "", build.FindOnly); err == nil {
-			err = symlinkHierarchy(p.Dir, filepath.Join(tempDir, "src", "pkg", gocovPackagePath))
-			if err != nil {
-				errorf("failed to symlink gocov: %s\n", err)
-				return 1
-			}
-		} else {
-			errorf("failed to locate gocov: %s\n", err)
+	// Copy gocov into the temporary GOROOT, since otherwise it'll
+	// be eclipsed by the instrumented packages root.
+	if p, err := build.Import(gocovPackagePath, "", build.FindOnly); err == nil {
+		err = symlinkHierarchy(p.Dir, filepath.Join(tempDir, "src", "pkg", gocovPackagePath))
+		if err != nil {
+			errorf("failed to symlink gocov: %s\n", err)
 			return 1
 		}
+	} else {
+		errorf("failed to locate gocov: %s\n", err)
+		return 1
+	}
 
-		var excluded []string
-		if len(*testExcludeFlag) > 0 {
-			excluded = strings.Split(*testExcludeFlag, ",")
-			sort.Strings(excluded)
-		}
+	var excluded []string
+	if len(*testExcludeFlag) > 0 {
+		excluded = strings.Split(*testExcludeFlag, ",")
+		sort.Strings(excluded)
+	}
 
-		cwd, err := os.Getwd()
-		if err != nil {
-			errorf("failed to determine current working directory: %s\n", err)
-		}
+	cwd, err := os.Getwd()
+	if err != nil {
+		errorf("failed to determine current working directory: %s\n", err)
+	}
 
-		in := &instrumenter{
-			gopath:       tempDir,
-			instrumented: make(map[string]*gocov.Package),
-			excluded:     excluded,
-			processed:    make(map[string]struct{}),
-			workingdir:   cwd}
+	in := &instrumenter{
+		gopath:       tempDir,
+		instrumented: make(map[string]*gocov.Package),
+		excluded:     excluded,
+		processed:    make(map[string]struct{}),
+		workingdir:   cwd,
+	}
+
+	for _, packageName := range importPaths(testFlags.Args()) {
 		err, packageName = in.abspkgpath(packageName)
 		if err != nil {
 			errorf("failed to resolve package path(%s): %s\n", packageName, err)
 			return 1
 		}
-		err = in.instrumentPackage(packageName, true)
-		if err != nil {
-			errorf("failed to instrument package(%s): %s\n", packageName, err)
-			return 1
+		if err := in.instrumentPackage(packageName, true); err != nil {
+			warnf("warning: failed to instrument package(%s): %s\n", packageName, err)
 		}
+	}
 
-		ninstrumented := 0
-		for _, pkg := range in.instrumented {
-			if pkg != nil {
-				ninstrumented++
-			}
-		}
-		if ninstrumented == 0 {
-			errorf("error: no packages were instrumented\n")
-			return 1
-		}
+	if in.ninstrumented() == 0 {
+		errorf("error: no packages were instrumented\n")
+		return 1
+	}
 
-		// Run "go test".
-		// TODO pass through test flags.
-		outfilePath := filepath.Join(tempDir, "gocov.out")
-		env := os.Environ()
-		env = putenv(env, "GOCOVOUT", outfilePath)
-		env = putenv(env, "GOROOT", tempDir)
+	// Run "go test".
+	// TODO pass through test flags.
+	outfile, err := ioutil.TempFile(tempDir, "gocov")
+	if err != nil {
+		errorf("could not create GOCOVOUT: %v", err)
+		rc = 1
+		return
+	}
+	outfile.Close()
+	outfilePath := outfile.Name()
+	env := os.Environ()
+	env = putenv(env, "GOCOVOUT", outfilePath)
+	env = putenv(env, "GOROOT", tempDir)
 
-		args := []string{"test"}
-		if verbose {
-			args = append(args, "-v")
-		}
-		if *testRunFlag != "" {
-			args = append(args, "-run", *testRunFlag)
-		}
-		instrumentedPackageName := instrumentedPackagePath(packageName)
-		args = append(args, instrumentedPackageName)
-		cmd := exec.Command("go", args...)
-		cmd.Env = env
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-		err = cmd.Run()
+	args := []string{"test", "-p", "1"} // disable parallel testing
+	if verbose {
+		args = append(args, "-v")
+	}
+	if *testRunFlag != "" {
+		args = append(args, "-run", *testRunFlag)
+	}
+	args = append(args, testFlags.Args()...)
+	cmd := exec.Command("go", args...)
+	cmd.Env = env
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	err = cmd.Run()
 
-		if err != nil {
-			errorf("go test failed: %s\n", err)
-			rc = 1
-		}
+	if err != nil {
+		errorf("go test failed: %s\n", err)
+		rc = 1
+	}
 
-		packages, err := parser.ParseTrace(outfilePath)
-		if err != nil {
-			errorf("failed to parse gocov output: %s\n", err)
-			rc = 1
-		} else {
-			data, err := marshalJson(packages)
-			if err != nil {
-				errorf("failed to format as JSON: %s\n", err)
-				rc = 1
-			} else {
-				fmt.Println(string(data))
-			}
-		}
+	packages, err := parser.ParseTrace(outfilePath)
+	if err != nil {
+		errorf("failed to parse gocov output: %s\n", err)
+		rc = 1
+		return
+	}
+
+	e := json.NewEncoder(os.Stdout)
+	if err := e.Encode(struct{ Packages []*gocov.Package }{packages}); err != nil {
+		errorf("failed to format as JSON: %s\n", err)
+		rc = 1
 	}
 	return
 }
